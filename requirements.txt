@@ -1,8 +1,10 @@
 flask
+flask-socketio
+gunicorn
+eventlet
 requests
 beautifulsoup4
 gTTS
 python-dotenv
 openai
 pytube
-gunicorn
