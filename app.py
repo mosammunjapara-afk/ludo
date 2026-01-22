@@ -2,9 +2,11 @@ from flask import Flask, render_template_string
 from flask_socketio import SocketIO, emit
 import random
 import time
+import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'ludo-secret!'
+# Render ke liye async_mode 'eventlet' ya 'threading' use hota hai
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 SAFE_POSITIONS = [0, 8, 13, 21, 26, 34, 39, 47]
@@ -158,23 +160,20 @@ def next_turn():
     game_state['log'] = f"👉 {game_state['turn'].upper()}'s TURN"
     emit('update_state', game_state, broadcast=True)
     
-    time.sleep(0.8)  # Small delay to ensure UI updates before bot starts
+    time.sleep(0.8)
     if game_state['mode'] == 'computer' and game_state['turn'] != game_state['user_color']:
         socketio.start_background_task(bot_turn)
 
 def bot_turn():
     time.sleep(1.8)
-    
     if (game_state['mode'] != 'computer' or 
         game_state['turn'] == game_state['user_color'] or 
         game_state['rolled_value'] is not None):
         return
-    
     roll_dice()
 
 def bot_make_move():
     time.sleep(1.6)
-    
     if (not game_state['can_move'] or 
         game_state['mode'] != 'computer' or 
         game_state['turn'] == game_state['user_color']):
@@ -353,5 +352,8 @@ HTML_CODE = """
 """
 
 if __name__ == '__main__':
-    print("🚀 LUDO SERVER STARTING ON http://localhost:5000")
-    socketio.run(app, debug=False, port=5000)
+    # RENDER KE LIYE DYNAMIC PORT HANDLING
+    port = int(os.environ.get("PORT", 5000))
+    print(f"🚀 LUDO SERVER STARTING ON PORT {port}")
+    # host '0.0.0.0' hona mandatory hai
+    socketio.run(app, host='0.0.0.0', port=port, debug=False)
