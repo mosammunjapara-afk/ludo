@@ -6,7 +6,7 @@ import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'ludo-secret!'
-# Render par real-time connection ke liye eventlet best hai
+# Cloud platforms ke liye 'eventlet' ya 'gevent' threading se behtar hota hai
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 SAFE_POSITIONS = [0, 8, 13, 21, 26, 34, 39, 47]
@@ -69,7 +69,6 @@ def handle_start_game(data):
 def handle_roll():
     if not game_state['game_started'] or game_state['rolled_value'] is not None:
         return
-    # Check if it's user's turn in computer mode
     if game_state['mode'] == 'computer' and game_state['turn'] != game_state['user_color']:
         return
     roll_dice()
@@ -124,20 +123,20 @@ def move_token(token_idx):
                         opp_tokens[i] = -1
                         captured = True
                         game_state['log'] = f"⚔️ {player.upper()} captured {opp.upper()}!"
-
+    
     if all(t == 99 for t in tokens):
-        game_state['log'] = f"🏆 {player.upper()} WINS! 🎉"
+        game_state['log'] = f"🏆 {player.upper()} WINS THE GAME! 🎉"
         emit('update_state', game_state, broadcast=True)
         return
-
+    
+    emit('update_state', game_state, broadcast=True)
     game_state['rolled_value'] = None
     game_state['can_move'] = False
-    emit('update_state', game_state, broadcast=True)
     
     if roll == 6 or captured:
         socketio.sleep(1.0)
         if game_state['mode'] == 'computer' and player != game_state['user_color']:
-            bot_turn()
+            socketio.start_background_task(bot_turn)
     else:
         socketio.sleep(1.0)
         next_turn()
@@ -173,56 +172,96 @@ HTML_CODE = """
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
         :root {--red:#ff4d4d;--green:#2ecc71;--yellow:#f1c40f;--blue:#3498db;--dark:#2c3e50;}
-        body {font-family:sans-serif; background:#34495e; display:flex; flex-direction:column; align-items:center; color:white;}
-        .board {display:grid; grid-template-columns:repeat(15,40px); grid-template-rows:repeat(15,40px); gap:2px; background:#bdc3c7; border:10px solid var(--dark);}
-        .cell {background:white; display:flex; align-items:center; justify-content:center; position:relative; color:#333;}
-        .yard {grid-row:span 6; grid-column:span 6;}
-        .red {background:var(--red);} .green {background:var(--green);} .yellow {background:var(--yellow);} .blue {background:var(--blue);}
-        .token {width:30px; height:30px; border-radius:50%; border:2px solid white; cursor:pointer;}
-        .movable {box-shadow: 0 0 10px 5px gold; animation: pulse 1s infinite;}
-        @keyframes pulse { 0% {transform:scale(1);} 50% {transform:scale(1.1);} 100% {transform:scale(1);} }
-        .status-box {padding:10px; background:white; color:black; margin:5px; border-radius:5px; cursor:pointer;}
-        .active {border:4px solid gold;}
-        #game-container {display:none; margin-top:20px;}
+        body {font-family:'Segoe UI',sans-serif;background:#34495e;display:flex;flex-direction:column;align-items:center;padding:20px;color:white;margin:0;height:100vh;justify-content:center;}
+        .big-btn {background:#f39c12;color:white;font-size:28px;padding:20px 40px;margin:20px;border:none;border-radius:20px;cursor:pointer;box-shadow:0 8px 16px rgba(0,0,0,0.4);}
+        .status-box {display:flex;align-items:center;background:white;padding:10px 18px;border-radius:12px;gap:12px;cursor:pointer;border-bottom:6px solid transparent;color:var(--dark);}
+        .status-box.active {border-bottom:6px solid #f1c40f; transform:translateY(-2px);}
+        .dice-slot {width:48px;height:48px;background:#f8f9fa;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:bold;border:1px solid #ddd;}
+        .board {display:grid;grid-template-columns:repeat(15,45px);grid-template-rows:repeat(15,45px);gap:2px;background:#b2bec3;border:12px solid var(--dark);border-radius:10px;}
+        .cell {background:white;position:relative;display:flex;align-items:center;justify-content:center;}
+        .yard {grid-row:span 6;grid-column:span 6;display:flex;align-items:center;justify-content:center;}
+        .yard.red {background:var(--red);} .yard.green {background:var(--green);} .yard.blue {background:var(--blue);} .yard.yellow {background:var(--yellow);}
+        .yard-inner {background:rgba(255,255,255,0.9);width:75%;height:75%;border-radius:10px;display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:15px;}
+        .token {width:32px;height:32px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:2px solid white;z-index:10;cursor:pointer;}
+        .token.red {background:var(--red);} .token.green {background:var(--green);} .token.yellow {background:var(--yellow);} .token.blue {background:var(--blue);}
+        .movable {animation:bounce 0.6s infinite alternate; border: 3px solid gold;}
+        @keyframes bounce {from {transform:rotate(-45deg) scale(1);} to {transform:rotate(-45deg) scale(1.15);}}
+        #game-container {display:none;}
     </style>
 </head>
 <body>
     <div id="setup">
-        <h1>🎲 LUDO PRO</h1>
-        <button onclick="start('computer')">VS COMPUTER</button>
-        <button onclick="start('multiplayer')">MULTIPLAYER</button>
+        <h1 style="font-size:48px;">🎲 LUDO PRO</h1>
+        <button class="big-btn" onclick="start('computer')">VS COMPUTER</button>
+        <button class="big-btn" onclick="start('multiplayer')">MULTIPLAYER</button>
     </div>
 
     <div id="game-container">
-        <h2 id="log">Waiting...</h2>
-        <div style="display:flex;">
-            <div id="box-red" class="status-box" onclick="roll()">RED DICE: <span id="dice-red">-</span></div>
-            <div id="box-green" class="status-box" onclick="roll()">GREEN DICE: <span id="dice-green">-</span></div>
-            <div id="box-yellow" class="status-box" onclick="roll()">YELLOW DICE: <span id="dice-yellow">-</span></div>
-            <div id="box-blue" class="status-box" onclick="roll()">BLUE DICE: <span id="dice-blue">-</span></div>
+        <div id="status-log" style="background:#1abc9c;padding:15px;border-radius:30px;margin-bottom:15px;text-align:center;font-weight:bold;">Wait...</div>
+        <div style="display:flex;justify-content:space-between;width:660px;margin-bottom:10px;">
+            <div id="box-red" class="status-box" onclick="roll()"><div style="width:20px;height:20px;background:var(--red);border-radius:50%;"></div><div class="dice-slot" id="dice-red">-</div></div>
+            <div id="box-green" class="status-box" onclick="roll()"><div class="dice-slot" id="dice-green">-</div><div style="width:20px;height:20px;background:var(--green);border-radius:50%;"></div></div>
         </div>
         <div class="board" id="board">
-            </div>
+            <div class="yard red" style="grid-area:1/1/7/7;"><div class="yard-inner" id="yard-red"></div></div>
+            <div class="yard green" style="grid-area:1/10/7/16;"><div class="yard-inner" id="yard-green"></div></div>
+            <div class="yard blue" style="grid-area:10/1/16/7;"><div class="yard-inner" id="yard-blue"></div></div>
+            <div class="yard yellow" style="grid-area:10/10/16/16;"><div class="yard-inner" id="yard-yellow"></div></div>
+            <div style="grid-area:7/7/10/10;background:conic-gradient(var(--green) 0% 25%, var(--yellow) 25% 50%, var(--blue) 50% 75%, var(--red) 75% 100%);"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;width:660px;margin-top:10px;">
+            <div id="box-blue" class="status-box" onclick="roll()"><div style="width:20px;height:20px;background:var(--blue);border-radius:50%;"></div><div class="dice-slot" id="dice-blue">-</div></div>
+            <div id="box-yellow" class="status-box" onclick="roll()"><div class="dice-slot" id="dice-yellow">-</div><div style="width:20px;height:20px;background:var(--yellow);border-radius:50%;"></div></div>
+        </div>
     </div>
 
     <script>
         const socket = io();
-        function start(m){ 
-            socket.emit('start_game', {mode:m, num_players:4, user_color:'red'});
+        let currentMode = '';
+        const pathCoords = [[7,2],[7,3],[7,4],[7,5],[7,6],[6,7],[5,7],[4,7],[3,7],[2,7],[1,7],[1,8],[1,9],[2,9],[3,9],[4,9],[5,9],[6,9],[7,10],[7,11],[7,12],[7,13],[7,14],[7,15],[8,15],[9,15],[9,14],[9,13],[9,12],[9,11],[9,10],[10,9],[11,9],[12,9],[13,9],[14,9],[15,9],[15,8],[15,7],[14,7],[13,7],[12,7],[11,7],[10,7],[9,6],[9,5],[9,4],[9,3],[9,2],[9,1],[8,1],[7,1]];
+        const homePaths = {red:[[8,2],[8,3],[8,4],[8,5],[8,6],[8,7]],green:[[2,8],[3,8],[4,8],[5,8],[6,8],[7,8]],yellow:[[8,14],[8,13],[8,12],[8,11],[8,10],[8,9]],blue:[[14,8],[13,8],[12,8],[11,8],[10,8],[9,8]]};
+
+        for(let r=1;r<=15;r++)for(let c=1;c<=15;c++)if(!((r<=6&&c<=6)||(r<=6&&c>=10)||(r>=10&&c<=6)||(r>=10&&c>=10)||(r>=7&&r<=9&&c>=7&&c<=9))){
+            let cell=document.createElement('div');cell.className='cell';cell.id=`cell-${r}-${c}`;
+            cell.style.gridRow=r;cell.style.gridColumn=c;document.getElementById('board').appendChild(cell);
+        }
+
+        function start(m){
+            currentMode = m;
+            socket.emit('start_game',{mode:m, num_players:4, user_color:'red'});
             document.getElementById('setup').style.display='none';
             document.getElementById('game-container').style.display='block';
         }
         function roll(){ socket.emit('roll_dice'); }
 
         socket.on('update_state', (state) => {
-            document.getElementById('log').innerText = state.log;
+            document.getElementById('status-log').innerText = state.log;
             ['red','green','yellow','blue'].forEach(c => {
                 document.getElementById(`dice-${c}`).innerText = state.turn === c ? (state.rolled_value || 'ROLL') : '-';
-                document.getElementById(`box-${c}`).className = 'status-box ' + (state.turn === c ? 'active' : '');
+                document.getElementById(`box-${c}`).classList.toggle('active', state.turn === c);
             });
-            // Simplified token rendering logic
             document.querySelectorAll('.token').forEach(t => t.remove());
-            // Token rendering would go here (similar to your previous code)
+            ['red','green','yellow','blue'].forEach(color => {
+                if(!state.active_colors.includes(color)) return;
+                state.players[color].tokens.forEach((pos, idx) => {
+                    if(pos === 99) return;
+                    let t = document.createElement('div');
+                    t.className = `token ${color}`;
+                    if(state.turn === color && state.can_move) {
+                        t.onclick = () => socket.emit('move_token', {token_index: idx});
+                        t.classList.add('movable');
+                    }
+                    if(pos === -1) document.getElementById(`yard-${color}`).appendChild(t);
+                    else if(pos >= 52) {
+                        let coords = homePaths[color][pos-52];
+                        if(coords) document.getElementById(`cell-${coords[0]}-${coords[1]}`).appendChild(t);
+                    } else {
+                        let actualIdx = (state.players[color].path_start + pos) % 52;
+                        let coords = pathCoords[actualIdx];
+                        if(coords) document.getElementById(`cell-${coords[0]}-${coords[1]}`).appendChild(t);
+                    }
+                });
+            });
         });
     </script>
 </body>
@@ -230,6 +269,6 @@ HTML_CODE = """
 """
 
 if __name__ == '__main__':
+    # Render dynamic port support
     port = int(os.environ.get("PORT", 5000))
-    # Render ke liye host='0.0.0.0' zaroori hai
     socketio.run(app, host='0.0.0.0', port=port)
