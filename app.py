@@ -6,7 +6,7 @@ import os
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'ludo-secret!')
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading', logger=True, engineio_logger=True)
 
 SAFE_POSITIONS = [0, 8, 13, 21, 26, 34, 39, 47]
 
@@ -34,9 +34,20 @@ turn_order = []
 def index():
     return render_template_string(HTML_CODE)
 
+@socketio.on('connect')
+def handle_connect():
+    print(f"Client connected: {request.sid if 'request' in dir() else 'unknown'}")
+    emit('connection_status', {'status': 'connected'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print("Client disconnected")
+
 @socketio.on('start_game')
 def handle_start_game(data):
     global game_state, turn_order
+    
+    print(f"Starting game with data: {data}")
     
     game_state['mode'] = data['mode']
     game_state['num_players'] = data['num_players']
@@ -59,8 +70,9 @@ def handle_start_game(data):
     game_state['turn'] = turn_order[0]
     game_state['rolled_value'] = None
     game_state['can_move'] = False
-    game_state['log'] = f"🎮 GAME STARTED! {game_state['turn'].upper()}'s TURN"
+    game_state['log'] = f"🎮 GAME STARTED! {game_state['turn'].upper()}'s TURN - Click dice to roll!"
     
+    print(f"Game state initialized: {game_state}")
     emit('update_state', game_state, broadcast=True)
     
     if game_state['mode'] == 'computer' and game_state['turn'] != game_state['user_color']:
@@ -68,12 +80,21 @@ def handle_start_game(data):
 
 @socketio.on('roll_dice')
 def handle_roll():
-    if not game_state['game_started'] or game_state['rolled_value'] is not None:
+    print(f"Roll dice received. Game started: {game_state['game_started']}, Current rolled_value: {game_state['rolled_value']}")
+    
+    if not game_state['game_started']:
+        print("Game not started yet")
+        return
+        
+    if game_state['rolled_value'] is not None:
+        print("Dice already rolled")
         return
     
     if game_state['mode'] == 'computer' and game_state['turn'] != game_state['user_color']:
+        print("It's bot's turn")
         return
     
+    print("Rolling dice...")
     roll_dice()
 
 def roll_dice():
@@ -81,16 +102,21 @@ def roll_dice():
     game_state['rolled_value'] = val
     game_state['log'] = f"🎲 {game_state['turn'].upper()} rolled {val}"
     
+    print(f"Rolled: {val}")
+    
     tokens = game_state['players'][game_state['turn']]['tokens']
     has_moves = any((t == -1 and val == 6) or (t >= 0 and t + val <= 57) for t in tokens)
     
+    print(f"Tokens: {tokens}, Has moves: {has_moves}")
+    
     if not has_moves:
-        game_state['log'] += " ❌ No moves!"
+        game_state['log'] += " ❌ No moves available!"
         emit('update_state', game_state, broadcast=True)
-        time.sleep(1.8)
+        socketio.sleep(1.8)
         next_turn()
     else:
         game_state['can_move'] = True
+        game_state['log'] += " ✅ Select a token to move!"
         emit('update_state', game_state, broadcast=True)
         
         if game_state['mode'] == 'computer' and game_state['turn'] != game_state['user_color']:
@@ -98,10 +124,14 @@ def roll_dice():
 
 @socketio.on('move_token')
 def handle_move(data):
+    print(f"Move token received: {data}")
+    
     if not game_state['can_move']:
+        print("Cannot move yet")
         return
     
     if game_state['mode'] == 'computer' and game_state['turn'] != game_state['user_color']:
+        print("It's bot's turn")
         return
     
     move_token(data['token_index'])
@@ -112,11 +142,18 @@ def move_token(token_idx):
     roll = game_state['rolled_value']
     captured = False
     
+    print(f"Moving token {token_idx} for {player}, roll: {roll}, current pos: {tokens[token_idx]}")
+    
     if tokens[token_idx] == -1 and roll == 6:
         tokens[token_idx] = 0
+        game_state['log'] = f"🚀 {player.upper()} brought token out!"
     elif tokens[token_idx] >= 0 and tokens[token_idx] + roll <= 57:
         new_pos = tokens[token_idx] + roll
         tokens[token_idx] = 99 if new_pos == 57 else new_pos
+        game_state['log'] = f"🎯 {player.upper()} moved forward!"
+    else:
+        print(f"Invalid move attempt")
+        return
     
     if 0 <= tokens[token_idx] <= 51 and tokens[token_idx] not in SAFE_POSITIONS:
         my_pos = (game_state['players'][player]['path_start'] + tokens[token_idx]) % 52
@@ -130,9 +167,11 @@ def move_token(token_idx):
                         opp_tokens[i] = -1
                         captured = True
                         game_state['log'] = f"⚔️ {player.upper()} captured {opp.upper()}!"
+                        print(f"Captured {opp}'s token!")
     
     if all(t == 99 for t in tokens):
-        game_state['log'] = f"🏆 {player.upper()} WINS THE GAME! 🎉"
+        game_state['log'] = f"🏆 {player.upper()} WINS THE GAME! 🎉🎉🎉"
+        game_state['game_started'] = False
         emit('update_state', game_state, broadcast=True)
         return
     
@@ -142,13 +181,13 @@ def move_token(token_idx):
     game_state['can_move'] = False
     
     if roll == 6 or captured:
-        game_state['log'] = f"🔄 {player.upper()} gets extra turn!"
+        game_state['log'] = f"🔄 {player.upper()} gets an extra turn!"
         emit('update_state', game_state, broadcast=True)
-        time.sleep(1.5)
+        socketio.sleep(1.5)
         if game_state['mode'] == 'computer' and player != game_state['user_color']:
             socketio.start_background_task(bot_turn)
     else:
-        time.sleep(1.2)
+        socketio.sleep(1.2)
         next_turn()
 
 def next_turn():
@@ -156,25 +195,28 @@ def next_turn():
     game_state['turn'] = turn_order[(idx + 1) % len(turn_order)]
     game_state['rolled_value'] = None
     game_state['can_move'] = False
-    game_state['log'] = f"👉 {game_state['turn'].upper()}'s TURN"
+    game_state['log'] = f"👉 {game_state['turn'].upper()}'s TURN - Click dice to roll!"
+    
+    print(f"Next turn: {game_state['turn']}")
     emit('update_state', game_state, broadcast=True)
     
-    time.sleep(0.8)
+    socketio.sleep(0.8)
     if game_state['mode'] == 'computer' and game_state['turn'] != game_state['user_color']:
         socketio.start_background_task(bot_turn)
 
 def bot_turn():
-    time.sleep(1.8)
+    socketio.sleep(1.8)
     
     if (game_state['mode'] != 'computer' or 
         game_state['turn'] == game_state['user_color'] or 
         game_state['rolled_value'] is not None):
         return
     
+    print(f"Bot rolling dice...")
     roll_dice()
 
 def bot_make_move():
-    time.sleep(1.6)
+    socketio.sleep(1.6)
     
     if (not game_state['can_move'] or 
         game_state['mode'] != 'computer' or 
@@ -183,6 +225,8 @@ def bot_make_move():
     
     tokens = game_state['players'][game_state['turn']]['tokens']
     roll = game_state['rolled_value']
+    
+    print(f"Bot making move, roll: {roll}, tokens: {tokens}")
     
     movable = [i for i, t in enumerate(tokens) 
                if (t == -1 and roll == 6) or (t >= 0 and t + roll <= 57)]
@@ -194,85 +238,111 @@ def bot_make_move():
         else:
             chosen = max(movable, key=lambda i: tokens[i] if tokens[i] >= 0 else -100)
         
+        print(f"Bot chose token {chosen}")
         move_token(chosen)
 
 HTML_CODE = """
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Ludo Pro - Fully Working</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
+        * {margin:0;padding:0;box-sizing:border-box;}
         :root {--red:#ff4d4d;--green:#2ecc71;--yellow:#f1c40f;--blue:#3498db;--dark:#2c3e50;}
-        body {font-family:'Segoe UI',sans-serif;background:#34495e;display:flex;flex-direction:column;align-items:center;padding:20px;color:white;margin:0;min-height:100vh;justify-content:center;}
-        #main-menu, #color-select, #player-select {text-align:center;}
-        .big-btn {background:#f39c12;color:white;font-size:28px;padding:20px 40px;margin:20px;border:none;border-radius:20px;cursor:pointer;box-shadow:0 8px 16px rgba(0,0,0,0.4);}
-        .color-option {display:inline-block;width:100px;height:100px;margin:20px;border-radius:50%;cursor:pointer;border:6px solid transparent;position:relative;}
-        .color-option.selected {border-color:gold;transform:scale(1.1);}
-        .color-option::after {content:'✓';position:absolute;inset:0;color:white;font-size:60px;display:flex;align-items:center;justify-content:center;opacity:0;font-weight:bold;}
+        body {font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);display:flex;flex-direction:column;align-items:center;padding:20px;color:white;margin:0;min-height:100vh;justify-content:center;}
+        #main-menu, #color-select, #player-select {text-align:center;display:block;}
+        #main-menu h1 {font-size:56px;margin-bottom:40px;text-shadow:3px 3px 6px rgba(0,0,0,0.3);animation:glow 2s ease-in-out infinite alternate;}
+        @keyframes glow {from {text-shadow:0 0 20px #fff,0 0 30px #fff,0 0 40px #f39c12;} to {text-shadow:0 0 10px #fff,0 0 20px #f39c12;}}
+        .big-btn {background:linear-gradient(135deg,#f39c12,#e67e22);color:white;font-size:32px;font-weight:bold;padding:25px 50px;margin:20px;border:none;border-radius:15px;cursor:pointer;box-shadow:0 10px 20px rgba(0,0,0,0.3);transition:all 0.3s;text-transform:uppercase;letter-spacing:2px;}
+        .big-btn:hover {transform:translateY(-5px) scale(1.05);box-shadow:0 15px 30px rgba(0,0,0,0.4);}
+        .big-btn:active {transform:translateY(-2px);}
+        .color-option {display:inline-block;width:120px;height:120px;margin:25px;border-radius:50%;cursor:pointer;border:8px solid rgba(255,255,255,0.3);position:relative;transition:all 0.3s;box-shadow:0 8px 16px rgba(0,0,0,0.2);}
+        .color-option:hover {transform:scale(1.1);border-color:rgba(255,215,0,0.6);box-shadow:0 12px 24px rgba(0,0,0,0.3);}
+        .color-option.selected {border-color:gold;transform:scale(1.15);box-shadow:0 0 30px rgba(255,215,0,0.6);}
+        .color-option::after {content:'✓';position:absolute;inset:0;color:white;font-size:70px;display:flex;align-items:center;justify-content:center;opacity:0;font-weight:bold;text-shadow:2px 2px 4px rgba(0,0,0,0.5);}
         .color-option.selected::after {opacity:1;}
-        .player-option {background:#3498db;color:white;font-size:24px;padding:30px 60px;margin:30px;border-radius:20px;cursor:pointer;display:inline-block;box-shadow:0 6px 12px rgba(0,0,0,0.3);}
-        .player-bar {display:flex;justify-content:space-between;width:660px;margin:10px 0;}
-        .status-box {display:flex;align-items:center;background:white;padding:10px 18px;border-radius:12px;gap:12px;cursor:pointer;border-bottom:6px solid transparent;transition:all 0.3s;color:var(--dark);}
-        .status-box.active {border-bottom:6px solid #f1c40f;transform:translateY(-2px);}
-        .status-box.bot {opacity:0.7;cursor:default;}
-        .dice-slot {width:48px;height:48px;background:#f8f9fa;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:bold;border:1px solid #ddd;}
-        .board {display:grid;grid-template-columns:repeat(15,45px);grid-template-rows:repeat(15,45px);gap:2px;background:#b2bec3;border:12px solid var(--dark);border-radius:10px;}
-        .cell {background:white;position:relative;display:flex;align-items:center;justify-content:center;}
-        .cell.safe-zone::after {content:"★";color:#bdc3c7;font-size:26px;position:absolute;}
-        #cell-8-2,#cell-8-3,#cell-8-4,#cell-8-5,#cell-8-6 {background:#ffcccc;}
+        .player-option {background:linear-gradient(135deg,#3498db,#2980b9);color:white;font-size:28px;font-weight:bold;padding:35px 70px;margin:25px;border-radius:15px;cursor:pointer;display:inline-block;box-shadow:0 8px 16px rgba(0,0,0,0.3);transition:all 0.3s;text-transform:uppercase;}
+        .player-option:hover {transform:translateY(-5px) scale(1.05);box-shadow:0 12px 24px rgba(0,0,0,0.4);}
+        .player-bar {display:flex;justify-content:space-between;width:700px;margin:12px 0;}
+        .status-box {display:flex;align-items:center;background:white;padding:12px 20px;border-radius:15px;gap:15px;cursor:pointer;border-bottom:8px solid transparent;transition:all 0.3s;color:var(--dark);box-shadow:0 4px 8px rgba(0,0,0,0.2);font-weight:bold;}
+        .status-box:hover {transform:translateY(-2px);box-shadow:0 6px 12px rgba(0,0,0,0.3);}
+        .status-box.active {border-bottom:8px solid #f1c40f;transform:translateY(-3px);box-shadow:0 8px 16px rgba(241,196,15,0.4);}
+        .status-box.bot {opacity:0.8;cursor:default;}
+        .status-box.bot:hover {transform:none;}
+        .color-indicator {width:24px;height:24px;border-radius:50%;border:2px solid #555;box-shadow:0 2px 4px rgba(0,0,0,0.2);}
+        .dice-slot {width:56px;height:56px;background:#f8f9fa;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:bold;border:2px solid #ddd;box-shadow:inset 0 2px 4px rgba(0,0,0,0.1);transition:all 0.2s;}
+        .status-box.active .dice-slot {animation:pulse 1s infinite;background:#fff9e6;}
+        @keyframes pulse {0%,100%{transform:scale(1);} 50%{transform:scale(1.1);}}
+        .board {display:grid;grid-template-columns:repeat(15,46px);grid-template-rows:repeat(15,46px);gap:2px;background:#95a5a6;border:15px solid var(--dark);border-radius:12px;box-shadow:0 20px 40px rgba(0,0,0,0.5);}
+        .cell {background:#ecf0f1;position:relative;display:flex;align-items:center;justify-content:center;transition:background 0.2s;}
+        .cell.safe-zone::after {content:"★";color:#f39c12;font-size:28px;position:absolute;text-shadow:1px 1px 2px rgba(0,0,0,0.2);}
+        #cell-8-2,#cell-8-3,#cell-8-4,#cell-8-5,#cell-8-6 {background:#ffcccb;}
         #cell-2-8,#cell-3-8,#cell-4-8,#cell-5-8,#cell-6-8 {background:#d5f5e3;}
         #cell-8-14,#cell-8-13,#cell-8-12,#cell-8-11,#cell-8-10 {background:#fcf3cf;}
         #cell-14-8,#cell-13-8,#cell-12-8,#cell-11-8,#cell-10-8 {background:#d6eaf8;}
-        .yard {grid-row:span 6;grid-column:span 6;display:flex;align-items:center;justify-content:center;}
-        .yard.red {background:var(--red);}
-        .yard.green {background:var(--green);}
-        .yard.blue {background:var(--blue);}
-        .yard.yellow {background:var(--yellow);}
-        .yard.inactive {opacity:0.4;}
-        .yard-inner {background:rgba(255,255,255,0.9);width:75%;height:75%;border-radius:10px;display:grid;grid-template-columns:1fr 1fr;gap:10px;padding:15px;}
-        .home-center {grid-column:7/span 3;grid-row:7/span 3;background:conic-gradient(var(--green)0deg 90deg,var(--yellow)90deg 180deg,var(--blue)180deg 270deg,var(--red)270deg 360deg);}
-        .token {width:32px;height:32px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:2px solid white;box-shadow:2px 2px 5px rgba(0,0,0,0.3);z-index:10;cursor:pointer;}
-        .token.red {background:var(--red);}
-        .token.green {background:var(--green);}
-        .token.yellow {background:var(--yellow);}
-        .token.blue {background:var(--blue);}
-        .movable {animation:bounce 0.6s infinite alternate;border-color:gold;}
-        @keyframes bounce {from {transform:rotate(-45deg) scale(1);} to {transform:rotate(-45deg) scale(1.15);}}
-        #status-log {background:#1abc9c;padding:15px 40px;border-radius:30px;margin:15px 0;font-weight:bold;font-size:18px;text-align:center;}
+        .yard {grid-row:span 6;grid-column:span 6;display:flex;align-items:center;justify-content:center;transition:opacity 0.3s;}
+        .yard.red {background:linear-gradient(135deg,#ff6b6b,#ee5a6f);}
+        .yard.green {background:linear-gradient(135deg,#2ecc71,#27ae60);}
+        .yard.blue {background:linear-gradient(135deg,#3498db,#2980b9);}
+        .yard.yellow {background:linear-gradient(135deg,#f1c40f,#f39c12);}
+        .yard.inactive {opacity:0.3;filter:grayscale(80%);}
+        .yard-inner {background:rgba(255,255,255,0.95);width:78%;height:78%;border-radius:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:18px;box-shadow:inset 0 2px 8px rgba(0,0,0,0.1);}
+        .home-center {grid-column:7/span 3;grid-row:7/span 3;background:conic-gradient(var(--green)0deg 90deg,var(--yellow)90deg 180deg,var(--blue)180deg 270deg,var(--red)270deg 360deg);border-radius:50%;box-shadow:inset 0 0 20px rgba(0,0,0,0.3);}
+        .token {width:36px;height:36px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);border:3px solid white;box-shadow:0 3px 6px rgba(0,0,0,0.3);z-index:10;cursor:pointer;transition:all 0.2s;}
+        .token.red {background:linear-gradient(135deg,#ff4d4d,#c0392b);}
+        .token.green {background:linear-gradient(135deg,#2ecc71,#27ae60);}
+        .token.yellow {background:linear-gradient(135deg,#f1c40f,#f39c12);}
+        .token.blue {background:linear-gradient(135deg,#3498db,#2980b9);}
+        .token:hover {transform:rotate(-45deg) scale(1.1);}
+        .movable {animation:bounce 0.7s infinite alternate;border-color:gold;box-shadow:0 0 15px rgba(255,215,0,0.8),0 3px 6px rgba(0,0,0,0.3);}
+        @keyframes bounce {from {transform:rotate(-45deg) scale(1);} to {transform:rotate(-45deg) scale(1.2);}}
+        #status-log {background:linear-gradient(135deg,#1abc9c,#16a085);padding:18px 45px;border-radius:40px;margin:18px 0;font-weight:bold;font-size:20px;text-align:center;box-shadow:0 8px 16px rgba(0,0,0,0.3);min-width:600px;text-transform:uppercase;letter-spacing:1px;}
         #game-container {display:none;}
+        #color-select, #player-select {display:none;}
+        h2 {font-size:42px;margin:30px 0;text-shadow:2px 2px 4px rgba(0,0,0,0.3);}
+        @media (max-width: 800px) {
+            .board {grid-template-columns:repeat(15,32px);grid-template-rows:repeat(15,32px);}
+            .player-bar {width:520px;}
+            #status-log {min-width:400px;font-size:16px;padding:12px 30px;}
+        }
     </style>
 </head>
 <body>
     <div id="main-menu">
-        <h1 style="font-size:48px;margin-bottom:50px;">🎲 LUDO PRO 🎲</h1>
-        <button class="big-btn" onclick="startComputer()">VS COMPUTER</button><br>
-        <button class="big-btn" onclick="startMultiplayer()">LOCAL MULTIPLAYER</button>
+        <h1>🎲 LUDO PRO 🎲</h1>
+        <button class="big-btn" onclick="startComputer()">🤖 VS COMPUTER</button><br>
+        <button class="big-btn" onclick="startMultiplayer()">👥 LOCAL MULTIPLAYER</button>
     </div>
-    <div id="color-select" style="display:none;">
-        <h2 style="font-size:36px;">SELECT YOUR COLOR</h2>
-        <div style="margin:50px;">
-            <div class="color-option" style="background:var(--blue);" onclick="selectColor('blue')"></div>
-            <div class="color-option" style="background:var(--red);" onclick="selectColor('red')"></div><br>
-            <div class="color-option" style="background:var(--green);" onclick="selectColor('green')"></div>
-            <div class="color-option" style="background:var(--yellow);" onclick="selectColor('yellow')"></div>
+    
+    <div id="color-select">
+        <h2>🎨 SELECT YOUR COLOR</h2>
+        <div style="margin:60px;">
+            <div class="color-option" style="background:var(--red);" data-color="red"></div>
+            <div class="color-option" style="background:var(--green);" data-color="green"></div><br>
+            <div class="color-option" style="background:var(--blue);" data-color="blue"></div>
+            <div class="color-option" style="background:var(--yellow);" data-color="yellow"></div>
         </div>
     </div>
-    <div id="player-select" style="display:none;">
-        <h2 style="font-size:36px;">SELECT PLAYERS</h2>
+    
+    <div id="player-select">
+        <h2>👥 SELECT NUMBER OF PLAYERS</h2>
         <div class="player-option" onclick="confirmGame(2)">2 PLAYERS</div><br>
         <div class="player-option" onclick="confirmGame(4)">4 PLAYERS</div>
     </div>
+    
     <div id="game-container">
-        <div id="status-log">Game will start here...</div>
+        <div id="status-log">Ready to play!</div>
         <div class="player-bar">
-            <div id="box-red" class="status-box" onclick="roll()">
-                <div style="width:20px;height:20px;background:var(--red);border-radius:50%;"></div>
+            <div id="box-red" class="status-box" onclick="rollDice()">
+                <div class="color-indicator" style="background:var(--red);"></div>
                 <div class="dice-slot" id="dice-red">-</div>
             </div>
-            <div id="box-green" class="status-box" onclick="roll()">
+            <div id="box-green" class="status-box" onclick="rollDice()">
                 <div class="dice-slot" id="dice-green">-</div>
-                <div style="width:20px;height:20px;background:var(--green);border-radius:50%;"></div>
+                <div class="color-indicator" style="background:var(--green);"></div>
             </div>
         </div>
         <div class="board" id="board">
@@ -283,67 +353,173 @@ HTML_CODE = """
             <div class="home-center"></div>
         </div>
         <div class="player-bar" style="margin-top:15px;">
-            <div id="box-blue" class="status-box" onclick="roll()">
-                <div style="width:20px;height:20px;background:var(--blue);border-radius:50%;"></div>
+            <div id="box-blue" class="status-box" onclick="rollDice()">
+                <div class="color-indicator" style="background:var(--blue);"></div>
                 <div class="dice-slot" id="dice-blue">-</div>
             </div>
-            <div id="box-yellow" class="status-box" onclick="roll()">
+            <div id="box-yellow" class="status-box" onclick="rollDice()">
                 <div class="dice-slot" id="dice-yellow">-</div>
-                <div style="width:20px;height:20px;background:var(--yellow);border-radius:50%;"></div>
+                <div class="color-indicator" style="background:var(--yellow);"></div>
             </div>
         </div>
     </div>
+    
     <script>
         const socket = io();
-        let gameMode = null, selectedColor = null;
+        let gameMode = null;
+        let selectedColor = null;
+        
         const pathCoords = [[7,2],[7,3],[7,4],[7,5],[7,6],[6,7],[5,7],[4,7],[3,7],[2,7],[1,7],[1,8],[1,9],[2,9],[3,9],[4,9],[5,9],[6,9],[7,10],[7,11],[7,12],[7,13],[7,14],[7,15],[8,15],[9,15],[9,14],[9,13],[9,12],[9,11],[9,10],[10,9],[11,9],[12,9],[13,9],[14,9],[15,9],[15,8],[15,7],[14,7],[13,7],[12,7],[11,7],[10,7],[9,6],[9,5],[9,4],[9,3],[9,2],[9,1],[8,1],[7,1]];
-        const homePaths = {red:[[8,2],[8,3],[8,4],[8,5],[8,6],[8,7]],green:[[2,8],[3,8],[4,8],[5,8],[6,8],[7,8]],yellow:[[8,14],[8,13],[8,12],[8,11],[8,10],[8,9]],blue:[[14,8],[13,8],[12,8],[11,8],[10,8],[9,8]]};
+        const homePaths = {
+            red:[[8,2],[8,3],[8,4],[8,5],[8,6],[8,7]],
+            green:[[2,8],[3,8],[4,8],[5,8],[6,8],[7,8]],
+            yellow:[[8,14],[8,13],[8,12],[8,11],[8,10],[8,9]],
+            blue:[[14,8],[13,8],[12,8],[11,8],[10,8],[9,8]]
+        };
         const safeCoords = ["7-2","2-7","6-9","9-14","14-9","9-2","7-14","2-9"];
         
-        for(let r=1;r<=15;r++)for(let c=1;c<=15;c++)if(!((r<=6&&c<=6)||(r<=6&&c>=10)||(r>=10&&c<=6)||(r>=10&&c>=10)||(r>=7&&r<=9&&c>=7&&c<=9))){let cell=document.createElement('div');cell.className='cell';cell.id=`cell-${r}-${c}`;if(safeCoords.includes(`${r}-${c}`))cell.classList.add('safe-zone');cell.style.gridRow=r;cell.style.gridColumn=c;document.getElementById('board').appendChild(cell);}
+        // Socket events
+        socket.on('connect', () => {
+            console.log('✅ Connected to server');
+        });
         
-        function startComputer(){gameMode='computer';document.getElementById('main-menu').style.display='none';document.getElementById('color-select').style.display='block';}
-        function startMultiplayer(){gameMode='multiplayer';document.getElementById('main-menu').style.display='none';document.getElementById('player-select').style.display='block';}
-        function selectColor(color){document.querySelectorAll('.color-option').forEach(el=>el.classList.remove('selected'));event.target.classList.add('selected');selectedColor=color;setTimeout(()=>{document.getElementById('color-select').style.display='none';document.getElementById('player-select').style.display='block';},500);}
-        function confirmGame(players){document.getElementById('player-select').style.display='none';document.getElementById('game-container').style.display='block';socket.emit('start_game',{mode:gameMode,num_players:players,user_color:gameMode==='computer'?selectedColor:null});}
-        function roll(){socket.emit('roll_dice');}
+        socket.on('disconnect', () => {
+            console.log('❌ Disconnected');
+        });
         
-        socket.on('update_state',(state)=>{
-            document.getElementById('status-log').innerText=state.log;
-            ['red','green','yellow','blue'].forEach(color=>{
-                const yard=document.querySelector(`.yard.${color}`);
-                const box=document.getElementById(`box-${color}`);
-                const dice=document.getElementById(`dice-${color}`);
-                yard.classList.toggle('inactive',!state.active_colors.includes(color));
+        socket.on('connection_status', (data) => {
+            console.log('Connection status:', data);
+        });
+        
+        // Initialize board cells
+        for(let r=1;r<=15;r++) {
+            for(let c=1;c<=15;c++) {
+                if(!((r<=6&&c<=6)||(r<=6&&c>=10)||(r>=10&&c<=6)||(r>=10&&c>=10)||(r>=7&&r<=9&&c>=7&&c<=9))) {
+                    let cell=document.createElement('div');
+                    cell.className='cell';
+                    cell.id=`cell-${r}-${c}`;
+                    if(safeCoords.includes(`${r}-${c}`)) cell.classList.add('safe-zone');
+                    cell.style.gridRow=r;
+                    cell.style.gridColumn=c;
+                    document.getElementById('board').appendChild(cell);
+                }
+            }
+        }
+        
+        // Color selection
+        document.querySelectorAll('.color-option').forEach(option => {
+            option.addEventListener('click', function() {
+                document.querySelectorAll('.color-option').forEach(el => el.classList.remove('selected'));
+                this.classList.add('selected');
+                selectedColor = this.getAttribute('data-color');
+                console.log('Selected color:', selectedColor);
+                setTimeout(() => {
+                    document.getElementById('color-select').style.display='none';
+                    document.getElementById('player-select').style.display='block';
+                }, 500);
+            });
+        });
+        
+        function startComputer() {
+            console.log('Starting computer mode');
+            gameMode = 'computer';
+            document.getElementById('main-menu').style.display='none';
+            document.getElementById('color-select').style.display='block';
+        }
+        
+        function startMultiplayer() {
+            console.log('Starting multiplayer mode');
+            gameMode = 'multiplayer';
+            document.getElementById('main-menu').style.display='none';
+            document.getElementById('player-select').style.display='block';
+        }
+        
+        function confirmGame(players) {
+            console.log('Confirming game:', {mode: gameMode, players, color: selectedColor});
+            document.getElementById('player-select').style.display='none';
+            document.getElementById('game-container').style.display='block';
+            
+            socket.emit('start_game', {
+                mode: gameMode,
+                num_players: players,
+                user_color: gameMode === 'computer' ? selectedColor : null
+            });
+        }
+        
+        function rollDice() {
+            console.log('Roll dice clicked');
+            socket.emit('roll_dice');
+        }
+        
+        socket.on('update_state', (state) => {
+            console.log('State update received:', state);
+            
+            document.getElementById('status-log').innerText = state.log;
+            
+            // Update player boxes
+            ['red','green','yellow','blue'].forEach(color => {
+                const yard = document.querySelector(`.yard.${color}`);
+                const box = document.getElementById(`box-${color}`);
+                const dice = document.getElementById(`dice-${color}`);
+                
+                yard.classList.toggle('inactive', !state.active_colors.includes(color));
                 box.classList.remove('active','bot');
-                dice.innerText='-';
-                if(state.turn===color&&state.active_colors.includes(color)){
+                dice.innerText = '-';
+                
+                if(state.turn === color && state.active_colors.includes(color)) {
                     box.classList.add('active');
-                    dice.innerText=state.rolled_value!==null?state.rolled_value:(gameMode==='computer'&&color!==state.user_color?'🤖':'ROLL');
-                    if(gameMode==='computer'&&color!==state.user_color)box.classList.add('bot');
+                    if(state.rolled_value !== null) {
+                        dice.innerText = state.rolled_value;
+                    } else {
+                        dice.innerText = (gameMode === 'computer' && color !== state.user_color) ? '🤖' : 'ROLL';
+                    }
+                    if(gameMode === 'computer' && color !== state.user_color) {
+                        box.classList.add('bot');
+                    }
                 }
             });
-            document.querySelectorAll('.token').forEach(e=>e.remove());
-            ['red','green','yellow','blue'].forEach(color=>{
-                if(!state.active_colors.includes(color))return;
-                state.players[color].tokens.forEach((pos,idx)=>{
-                    if(pos===99)return;
-                    let token=document.createElement('div');
-                    token.className=`token ${color}`;
-                    if(state.turn===color&&state.can_move&&(gameMode==='multiplayer'||color===state.user_color)){
-                        token.onclick=()=>socket.emit('move_token',{token_index:idx});
-                        token.classList.add('movable');
+            
+            // Clear and redraw tokens
+            document.querySelectorAll('.token').forEach(e => e.remove());
+            
+            ['red','green','yellow','blue'].forEach(color => {
+                if(!state.active_colors.includes(color)) return;
+                
+                state.players[color].tokens.forEach((pos, idx) => {
+                    if(pos === 99) return; // Token finished
+                    
+                    let token = document.createElement('div');
+                    token.className = `token ${color}`;
+                    
+                    // Check if token is movable
+                    if(state.turn === color && state.can_move && (gameMode === 'multiplayer' || color === state.user_color)) {
+                        const roll = state.rolled_value;
+                        if((pos === -1 && roll === 6) || (pos >= 0 && pos + roll <= 57)) {
+                            token.classList.add('movable');
+                            token.onclick = () => {
+                                console.log('Token clicked:', idx);
+                                socket.emit('move_token', {token_index: idx});
+                            };
+                        }
                     }
-                    if(pos===-1){
+                    
+                    // Place token
+                    if(pos === -1) {
                         document.getElementById(`yard-${color}`).appendChild(token);
-                    }else if(pos>=52){
-                        let step=pos-52;
-                        let coords=homePaths[color][step];
-                        if(coords)document.getElementById(`cell-${coords[0]}-${coords[1]}`).appendChild(token);
-                    }else{
-                        let actualIdx=(state.players[color].path_start+pos)%52;
-                        let coords=pathCoords[actualIdx];
-                        if(coords)document.getElementById(`cell-${coords[0]}-${coords[1]}`).appendChild(token);
+                    } else if(pos >= 52) {
+                        let step = pos - 52;
+                        let coords = homePaths[color][step];
+                        if(coords) {
+                            const cell = document.getElementById(`cell-${coords[0]}-${coords[1]}`);
+                            if(cell) cell.appendChild(token);
+                        }
+                    } else {
+                        let actualIdx = (state.players[color].path_start + pos) % 52;
+                        let coords = pathCoords[actualIdx];
+                        if(coords) {
+                            const cell = document.getElementById(`cell-${coords[0]}-${coords[1]}`);
+                            if(cell) cell.appendChild(token);
+                        }
                     }
                 });
             });
@@ -355,5 +531,5 @@ HTML_CODE = """
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print(f"🚀 LUDO SERVER STARTING ON PORT {port}")
+    print(f"🚀 LUDO SERVER STARTING ON http://0.0.0.0:{port}")
     socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
