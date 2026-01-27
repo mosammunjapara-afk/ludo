@@ -2,9 +2,10 @@ from flask import Flask, render_template_string
 from flask_socketio import SocketIO, emit
 import random
 import time
+import os
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'ludo-secret!'
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'ludo-secret!')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 SAFE_POSITIONS = [0, 8, 13, 21, 26, 34, 39, 47]
@@ -158,7 +159,7 @@ def next_turn():
     game_state['log'] = f"👉 {game_state['turn'].upper()}'s TURN"
     emit('update_state', game_state, broadcast=True)
     
-    time.sleep(0.8)  # Small delay to ensure UI updates before bot starts
+    time.sleep(0.8)
     if game_state['mode'] == 'computer' and game_state['turn'] != game_state['user_color']:
         socketio.start_background_task(bot_turn)
 
@@ -203,7 +204,7 @@ HTML_CODE = """
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
         :root {--red:#ff4d4d;--green:#2ecc71;--yellow:#f1c40f;--blue:#3498db;--dark:#2c3e50;}
-        body {font-family:'Segoe UI',sans-serif;background:#34495e;display:flex;flex-direction:column;align-items:center;padding:20px;color:white;margin:0;height:100vh;justify-content:center;}
+        body {font-family:'Segoe UI',sans-serif;background:#34495e;display:flex;flex-direction:column;align-items:center;padding:20px;color:white;margin:0;min-height:100vh;justify-content:center;}
         #main-menu, #color-select, #player-select {text-align:center;}
         .big-btn {background:#f39c12;color:white;font-size:28px;padding:20px 40px;margin:20px;border:none;border-radius:20px;cursor:pointer;box-shadow:0 8px 16px rgba(0,0,0,0.4);}
         .color-option {display:inline-block;width:100px;height:100px;margin:20px;border-radius:50%;cursor:pointer;border:6px solid transparent;position:relative;}
@@ -353,5 +354,6 @@ HTML_CODE = """
 """
 
 if __name__ == '__main__':
-    print("🚀 LUDO SERVER STARTING ON http://localhost:5000")
-    socketio.run(app, debug=False, port=5000)
+    port = int(os.environ.get('PORT', 5000))
+    print(f"🚀 LUDO SERVER STARTING ON PORT {port}")
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
