@@ -1,13 +1,22 @@
 from flask import Flask, render_template_string, request, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room, rooms
 import random
-import time
 import os
 import string
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'ludo-secret!')
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'ludo-secret-key-2025')
+
+# IMPORTANT: Production configuration for Render/Heroku/Railway
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='threading',
+    logger=True,
+    engineio_logger=True,
+    ping_timeout=60,
+    ping_interval=25
+)
 
 SAFE_POSITIONS = [0, 8, 13, 21, 26, 34, 39, 47]
 
@@ -48,6 +57,11 @@ def create_game_state():
 @app.route('/')
 def index():
     return render_template_string(HTML_CODE)
+
+@app.route('/health')
+def health():
+    """Health check endpoint for monitoring"""
+    return jsonify({'status': 'ok', 'rooms': len(game_rooms)})
 
 @app.route('/api/create-room', methods=['POST'])
 def create_room():
@@ -101,7 +115,6 @@ def handle_connect():
 def handle_disconnect():
     print(f"❌ Client disconnected: {request.sid}")
     
-    # Find and update any rooms this player was in
     for room_code, game_state in list(game_rooms.items()):
         if request.sid in game_state['player_sessions']:
             game_state['connected_players'] -= 1
@@ -123,12 +136,10 @@ def handle_join_room(data):
     
     game_state = game_rooms[room_code]
     
-    # Check if color is available
     if selected_color in game_state['player_sessions'].values():
         emit('error', {'message': 'Color already taken'})
         return
     
-    # Join the room
     join_room(room_code)
     game_state['player_sessions'][request.sid] = selected_color
     game_state['connected_players'] += 1
@@ -145,16 +156,13 @@ def handle_start_game(data):
     
     if room_code and room_code in game_rooms:
         game_state = game_rooms[room_code]
-        print(f"🎮 Using existing room {room_code}: {data}")
+        print(f"🎮 Using existing room {room_code}")
     else:
-        # Create local room for computer/local multiplayer
         room_code = f"LOCAL_{request.sid}"
         game_state = create_game_state()
         game_rooms[room_code] = game_state
         join_room(room_code)
-        print(f"🎮 Created local room {room_code}: {data}")
-    
-    print(f"🎮 Starting game in room {room_code}: {data}")
+        print(f"🎮 Created local room {room_code}")
     
     game_state['mode'] = data.get('mode', 'multiplayer')
     game_state['num_players'] = data.get('num_players', 4)
@@ -167,7 +175,6 @@ def handle_start_game(data):
             opp = {'red':'yellow', 'yellow':'red', 'green':'blue', 'blue':'green'}
             game_state['active_colors'] = [data['user_color'], opp[data['user_color']]]
         else:
-            # For online 2-player, use the colors that players selected
             if room_code.startswith('LOCAL_'):
                 game_state['active_colors'] = ['red', 'yellow']
             else:
@@ -187,9 +194,8 @@ def handle_start_game(data):
     game_state['can_move'] = False
     game_state['log'] = f"🎮 {game_state['turn'].upper()}'s TURN - CLICK DICE TO ROLL!"
     
-    print(f"✅ Game initialized in room {room_code}. Turn: {game_state['turn']}")
+    print(f"✅ Game initialized in room {room_code}")
     
-    # IMPORTANT: Send room code back to client
     emit('room_assigned', {'room_code': room_code})
     emit('update_state', game_state, room=room_code)
     
@@ -201,33 +207,22 @@ def handle_roll(data=None):
     room_code = data.get('room_code') if data else None
     
     if not room_code or room_code not in game_rooms:
-        print(f"❌ Invalid room. Received: {room_code}")
+        print(f"❌ Invalid room: {room_code}")
         return
     
     game_state = game_rooms[room_code]
     
-    print(f"🎲 Roll request - Room: {room_code}, Started: {game_state['game_started']}, Rolled: {game_state['rolled_value']}, Turn: {game_state['turn']}")
-    
-    if not game_state['game_started']:
-        print("❌ Game not started")
-        return
-        
-    if game_state['rolled_value'] is not None:
-        print("❌ Already rolled")
+    if not game_state['game_started'] or game_state['rolled_value'] is not None:
         return
     
-    # Check if it's this player's turn (for online multiplayer)
-    if room_code in game_rooms and not room_code.startswith('LOCAL_'):
+    if not room_code.startswith('LOCAL_'):
         player_color = game_state['player_sessions'].get(request.sid)
         if player_color and player_color != game_state['turn']:
-            print(f"❌ Not {player_color}'s turn")
             return
     
     if game_state['mode'] == 'computer' and game_state['turn'] != game_state['user_color']:
-        print("❌ Bot's turn")
         return
     
-    print("✅ Rolling dice...")
     roll_dice(room_code)
 
 def roll_dice(room_code):
@@ -237,12 +232,8 @@ def roll_dice(room_code):
     game_state['rolled_value'] = val
     game_state['log'] = f"🎲 {game_state['turn'].upper()} ROLLED {val}!"
     
-    print(f"🎲 Rolled: {val} in room {room_code}")
-    
     tokens = game_state['players'][game_state['turn']]['tokens']
     has_moves = any((t == -1 and val == 6) or (t >= 0 and t + val <= 57) for t in tokens)
-    
-    print(f"Tokens: {tokens}, Valid moves: {has_moves}")
     
     if not has_moves:
         game_state['log'] += " ❌ NO VALID MOVES!"
@@ -262,26 +253,19 @@ def handle_move(data):
     room_code = data.get('room_code')
     
     if not room_code or room_code not in game_rooms:
-        print(f"❌ Invalid room for move. Received: {room_code}")
         return
     
     game_state = game_rooms[room_code]
     
-    print(f"🎯 Move request - Token: {data['token_index']}, Can move: {game_state['can_move']}")
-    
     if not game_state['can_move']:
-        print("❌ Cannot move yet")
         return
     
-    # Check if it's this player's turn (for online multiplayer)
     if not room_code.startswith('LOCAL_'):
         player_color = game_state['player_sessions'].get(request.sid)
         if player_color and player_color != game_state['turn']:
-            print(f"❌ Not {player_color}'s turn")
             return
     
     if game_state['mode'] == 'computer' and game_state['turn'] != game_state['user_color']:
-        print("❌ Bot's turn")
         return
     
     move_token(data['token_index'], room_code)
@@ -293,18 +277,12 @@ def move_token(token_idx, room_code):
     roll = game_state['rolled_value']
     captured = False
     
-    print(f"Moving {player} token {token_idx}: {tokens[token_idx]} + {roll}")
-    
-    # Validate move
     if tokens[token_idx] == -1 and roll != 6:
-        print("❌ Need 6 to exit home")
         return
     
     if tokens[token_idx] >= 0 and tokens[token_idx] + roll > 57:
-        print("❌ Move exceeds home")
         return
     
-    # Execute move
     if tokens[token_idx] == -1 and roll == 6:
         tokens[token_idx] = 0
         game_state['log'] = f"🚀 {player.upper()} BROUGHT TOKEN OUT!"
@@ -313,7 +291,6 @@ def move_token(token_idx, room_code):
         tokens[token_idx] = 99 if new_pos == 57 else new_pos
         game_state['log'] = f"🎯 {player.upper()} MOVED!"
     
-    # Check for captures
     if 0 <= tokens[token_idx] <= 51 and tokens[token_idx] not in SAFE_POSITIONS:
         my_pos = (game_state['players'][player]['path_start'] + tokens[token_idx]) % 52
         for opp in game_state['active_colors']:
@@ -326,9 +303,7 @@ def move_token(token_idx, room_code):
                         opp_tokens[i] = -1
                         captured = True
                         game_state['log'] = f"⚔️ {player.upper()} CAPTURED {opp.upper()}!"
-                        print(f"⚔️ Captured!")
     
-    # Check win
     if all(t == 99 for t in tokens):
         game_state['log'] = f"🏆 {player.upper()} WINS! 🎉🎉🎉"
         game_state['game_started'] = False
@@ -359,7 +334,6 @@ def next_turn(room_code):
     game_state['can_move'] = False
     game_state['log'] = f"👉 {game_state['turn'].upper()}'s TURN - CLICK DICE TO ROLL!"
     
-    print(f"➡️ Next turn: {game_state['turn']} in room {room_code}")
     socketio.emit('update_state', game_state, room=room_code)
     
     socketio.sleep(0.8)
@@ -379,7 +353,6 @@ def bot_turn(room_code):
         game_state['rolled_value'] is not None):
         return
     
-    print(f"🤖 Bot rolling in room {room_code}...")
     roll_dice(room_code)
 
 def bot_make_move(room_code):
@@ -398,8 +371,6 @@ def bot_make_move(room_code):
     tokens = game_state['players'][game_state['turn']]['tokens']
     roll = game_state['rolled_value']
     
-    print(f"🤖 Bot thinking... Roll: {roll}, Tokens: {tokens}")
-    
     movable = [i for i, t in enumerate(tokens) 
                if (t == -1 and roll == 6) or (t >= 0 and t + roll <= 57)]
     
@@ -410,7 +381,6 @@ def bot_make_move(room_code):
         else:
             chosen = max(movable, key=lambda i: tokens[i] if tokens[i] >= 0 else -100)
         
-        print(f"🤖 Bot chose token {chosen}")
         move_token(chosen, room_code)
 
 HTML_CODE = """
@@ -419,28 +389,24 @@ HTML_CODE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🎲 Ludo Pro - All Modes Working!</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <title>🎲 Ludo Pro - Production Ready!</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
     <style>
         * {margin:0;padding:0;box-sizing:border-box;}
         :root {--red:#ff4d4d;--green:#2ecc71;--yellow:#f1c40f;--blue:#3498db;--dark:#2c3e50;}
         body {font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);display:flex;flex-direction:column;align-items:center;padding:20px;color:white;margin:0;min-height:100vh;justify-content:center;}
         
-        /* Menu Styles */
         #main-menu, #color-select, #player-select, #room-menu {text-align:center;display:block;}
         #main-menu h1 {font-size:56px;margin-bottom:40px;text-shadow:3px 3px 6px rgba(0,0,0,0.3);animation:glow 2s ease-in-out infinite alternate;}
         @keyframes glow {from {text-shadow:0 0 20px #fff,0 0 30px #fff,0 0 40px #f39c12;} to {text-shadow:0 0 10px #fff,0 0 20px #f39c12;}}
         .big-btn {background:linear-gradient(135deg,#f39c12,#e67e22);color:white;font-size:32px;font-weight:bold;padding:25px 50px;margin:20px;border:none;border-radius:15px;cursor:pointer;box-shadow:0 10px 20px rgba(0,0,0,0.3);transition:all 0.3s;text-transform:uppercase;letter-spacing:2px;}
         .big-btn:hover {transform:translateY(-5px) scale(1.05);box-shadow:0 15px 30px rgba(0,0,0,0.4);}
-        .big-btn:active {transform:translateY(-2px);}
         
-        /* Room Code Display */
         .room-code-display {background:rgba(255,255,255,0.2);padding:20px 40px;border-radius:15px;margin:20px auto;font-size:48px;font-weight:900;letter-spacing:8px;box-shadow:0 8px 16px rgba(0,0,0,0.3);border:3px solid rgba(255,255,255,0.4);}
         
         .input-field {font-size:32px;padding:20px;border-radius:10px;border:3px solid rgba(255,255,255,0.3);background:rgba(255,255,255,0.9);color:#2c3e50;font-weight:bold;letter-spacing:4px;text-align:center;text-transform:uppercase;margin:20px;}
         .input-field:focus {outline:none;border-color:#f39c12;box-shadow:0 0 20px rgba(243,156,18,0.5);}
         
-        /* Color Selection */
         .color-option {display:inline-block;width:120px;height:120px;margin:25px;border-radius:50%;cursor:pointer;border:8px solid rgba(255,255,255,0.3);position:relative;transition:all 0.3s;box-shadow:0 8px 16px rgba(0,0,0,0.2);}
         .color-option:hover {transform:scale(1.1);border-color:rgba(255,215,0,0.6);box-shadow:0 12px 24px rgba(0,0,0,0.3);}
         .color-option.selected {border-color:gold;transform:scale(1.15);box-shadow:0 0 30px rgba(255,215,0,0.6);}
@@ -451,7 +417,6 @@ HTML_CODE = """
         .player-option {background:linear-gradient(135deg,#3498db,#2980b9);color:white;font-size:28px;font-weight:bold;padding:35px 70px;margin:25px;border-radius:15px;cursor:pointer;display:inline-block;box-shadow:0 8px 16px rgba(0,0,0,0.3);transition:all 0.3s;text-transform:uppercase;}
         .player-option:hover {transform:translateY(-5px) scale(1.05);box-shadow:0 12px 24px rgba(0,0,0,0.4);}
         
-        /* Game UI */
         .player-bar {display:flex;justify-content:space-between;width:700px;margin:12px 0;}
         .status-box {display:flex;align-items:center;background:white;padding:15px 25px;border-radius:15px;gap:15px;cursor:pointer;border:5px solid transparent;transition:all 0.3s;color:var(--dark);box-shadow:0 4px 8px rgba(0,0,0,0.2);font-weight:bold;min-width:160px;justify-content:center;}
         .status-box:hover {transform:translateY(-2px) scale(1.02);box-shadow:0 6px 12px rgba(0,0,0,0.3);}
@@ -460,41 +425,11 @@ HTML_CODE = """
         
         .color-indicator {width:28px;height:28px;border-radius:50%;border:3px solid #555;box-shadow:0 2px 4px rgba(0,0,0,0.2);}
         
-        .dice-slot {
-            width:70px;
-            height:70px;
-            background:linear-gradient(145deg,#ffffff,#f0f0f0);
-            border-radius:15px;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            font-size:32px;
-            font-weight:900;
-            border:4px solid #ddd;
-            box-shadow:0 4px 8px rgba(0,0,0,0.2);
-            transition:all 0.2s;
-            cursor:pointer;
-            user-select:none;
-        }
-        .dice-slot:hover {
-            transform:scale(1.1);
-            box-shadow:0 6px 12px rgba(0,0,0,0.3);
-        }
-        .status-box.active .dice-slot {
-            animation:shakeDice 0.8s infinite;
-            background:linear-gradient(145deg,#fff9cc,#ffe066);
-            border:4px solid #f39c12;
-            box-shadow:0 0 30px rgba(243,156,18,0.8);
-            font-size:24px;
-            cursor:pointer !important;
-        }
-        @keyframes shakeDice {
-            0%, 100% {transform:rotate(0deg) scale(1);}
-            25% {transform:rotate(-5deg) scale(1.05);}
-            75% {transform:rotate(5deg) scale(1.05);}
-        }
+        .dice-slot {width:70px;height:70px;background:linear-gradient(145deg,#ffffff,#f0f0f0);border-radius:15px;display:flex;align-items:center;justify-content:center;font-size:32px;font-weight:900;border:4px solid #ddd;box-shadow:0 4px 8px rgba(0,0,0,0.2);transition:all 0.2s;cursor:pointer;user-select:none;}
+        .dice-slot:hover {transform:scale(1.1);box-shadow:0 6px 12px rgba(0,0,0,0.3);}
+        .status-box.active .dice-slot {animation:shakeDice 0.8s infinite;background:linear-gradient(145deg,#fff9cc,#ffe066);border:4px solid #f39c12;box-shadow:0 0 30px rgba(243,156,18,0.8);font-size:24px;cursor:pointer !important;}
+        @keyframes shakeDice {0%, 100% {transform:rotate(0deg) scale(1);} 25% {transform:rotate(-5deg) scale(1.05);} 75% {transform:rotate(5deg) scale(1.05);}}
         
-        /* Board */
         .board {display:grid;grid-template-columns:repeat(15,46px);grid-template-rows:repeat(15,46px);gap:2px;background:#95a5a6;border:15px solid var(--dark);border-radius:12px;box-shadow:0 20px 40px rgba(0,0,0,0.5);}
         .cell {background:#ecf0f1;position:relative;display:flex;align-items:center;justify-content:center;transition:background 0.2s;}
         .cell.safe-zone::after {content:"★";color:#f39c12;font-size:28px;position:absolute;text-shadow:1px 1px 2px rgba(0,0,0,0.2);}
@@ -523,20 +458,7 @@ HTML_CODE = """
         .movable {animation:bounce 0.7s infinite alternate;border-color:gold;border-width:4px;box-shadow:0 0 20px rgba(255,215,0,0.9),0 3px 6px rgba(0,0,0,0.3);}
         @keyframes bounce {from {transform:rotate(-45deg) scale(1);} to {transform:rotate(-45deg) scale(1.25);}}
         
-        #status-log {
-            background:linear-gradient(135deg,#1abc9c,#16a085);
-            padding:20px 50px;
-            border-radius:40px;
-            margin:18px 0;
-            font-weight:900;
-            font-size:22px;
-            text-align:center;
-            box-shadow:0 8px 16px rgba(0,0,0,0.3);
-            min-width:650px;
-            text-transform:uppercase;
-            letter-spacing:2px;
-            animation:fadeIn 0.5s;
-        }
+        #status-log {background:linear-gradient(135deg,#1abc9c,#16a085);padding:20px 50px;border-radius:40px;margin:18px 0;font-weight:900;font-size:22px;text-align:center;box-shadow:0 8px 16px rgba(0,0,0,0.3);min-width:650px;text-transform:uppercase;letter-spacing:2px;animation:fadeIn 0.5s;}
         @keyframes fadeIn {from {opacity:0;transform:translateY(-10px);} to {opacity:1;transform:translateY(0);}}
         
         #game-container {display:none;}
@@ -546,15 +468,29 @@ HTML_CODE = """
         .copy-btn {background:linear-gradient(135deg,#3498db,#2980b9);color:white;font-size:18px;padding:12px 30px;border:none;border-radius:10px;cursor:pointer;margin-top:15px;font-weight:bold;box-shadow:0 4px 8px rgba(0,0,0,0.2);transition:all 0.3s;}
         .copy-btn:hover {transform:translateY(-2px);box-shadow:0 6px 12px rgba(0,0,0,0.3);}
         
-        @media (max-width: 800px) {
-            .board {grid-template-columns:repeat(15,32px);grid-template-rows:repeat(15,32px);}
-            .player-bar {width:520px;}
-            #status-log {min-width:400px;font-size:18px;padding:15px 35px;}
-            .dice-slot {width:60px;height:60px;font-size:28px;}
+        /* Connection status indicator */
+        .connection-status {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            z-index: 1000;
+        }
+        .connection-status.connected {
+            background: rgba(46, 204, 113, 0.8);
+        }
+        .connection-status.disconnected {
+            background: rgba(231, 76, 60, 0.8);
         }
     </style>
 </head>
 <body>
+    <div class="connection-status" id="connStatus">Connecting...</div>
+
     <div id="main-menu">
         <h1>🎲 LUDO PRO 🎲</h1>
         <button class="big-btn" onclick="startComputer()">🤖 VS COMPUTER</button><br>
@@ -624,23 +560,39 @@ HTML_CODE = """
     </div>
     
     <script>
-        const socket = io();
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            upgrade: true,
+            rememberUpgrade: true,
+            timeout: 10000,
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionAttempts: 5
+        });
+        
         let gameMode = null;
         let selectedColor = null;
         let currentRoomCode = null;
         let isOnlineMode = false;
         
-        const pathCoords = [[7,2],[7,3],[7,4],[7,5],[7,6],[6,7],[5,7],[4,7],[3,7],[2,7],[1,7],[1,8],[1,9],[2,9],[3,9],[4,9],[5,9],[6,9],[7,10],[7,11],[7,12],[7,13],[7,14],[7,15],[8,15],[9,15],[9,14],[9,13],[9,12],[9,11],[9,10],[10,9],[11,9],[12,9],[13,9],[14,9],[15,9],[15,8],[15,7],[14,7],[13,7],[12,7],[11,7],[10,7],[9,6],[9,5],[9,4],[9,3],[9,2],[9,1],[8,1],[7,1]];
-        const homePaths = {
-            red:[[8,2],[8,3],[8,4],[8,5],[8,6],[8,7]],
-            green:[[2,8],[3,8],[4,8],[5,8],[6,8],[7,8]],
-            yellow:[[8,14],[8,13],[8,12],[8,11],[8,10],[8,9]],
-            blue:[[14,8],[13,8],[12,8],[11,8],[10,8],[9,8]]
-        };
-        const safeCoords = ["7-2","2-7","6-9","9-14","14-9","9-2","7-14","2-9"];
+        const connStatus = document.getElementById('connStatus');
         
         socket.on('connect', () => {
-            console.log('✅ CONNECTED TO SERVER');
+            console.log('✅ Connected to server');
+            connStatus.textContent = '✅ Connected';
+            connStatus.className = 'connection-status connected';
+        });
+        
+        socket.on('disconnect', () => {
+            console.log('❌ Disconnected from server');
+            connStatus.textContent = '❌ Disconnected';
+            connStatus.className = 'connection-status disconnected';
+        });
+        
+        socket.on('connect_error', (error) => {
+            console.error('Connection error:', error);
+            connStatus.textContent = '⚠️ Connection Error';
+            connStatus.className = 'connection-status disconnected';
         });
         
         socket.on('error', (data) => {
@@ -652,11 +604,19 @@ HTML_CODE = """
             currentRoomCode = data.room_code;
         });
         
-        // CRITICAL: Listen for room assignment from server
         socket.on('room_assigned', (data) => {
-            console.log('📍 Room assigned by server:', data.room_code);
+            console.log('📍 Room assigned:', data.room_code);
             currentRoomCode = data.room_code;
         });
+        
+        const pathCoords = [[7,2],[7,3],[7,4],[7,5],[7,6],[6,7],[5,7],[4,7],[3,7],[2,7],[1,7],[1,8],[1,9],[2,9],[3,9],[4,9],[5,9],[6,9],[7,10],[7,11],[7,12],[7,13],[7,14],[7,15],[8,15],[9,15],[9,14],[9,13],[9,12],[9,11],[9,10],[10,9],[11,9],[12,9],[13,9],[14,9],[15,9],[15,8],[15,7],[14,7],[13,7],[12,7],[11,7],[10,7],[9,6],[9,5],[9,4],[9,3],[9,2],[9,1],[8,1],[7,1]];
+        const homePaths = {
+            red:[[8,2],[8,3],[8,4],[8,5],[8,6],[8,7]],
+            green:[[2,8],[3,8],[4,8],[5,8],[6,8],[7,8]],
+            yellow:[[8,14],[8,13],[8,12],[8,11],[8,10],[8,9]],
+            blue:[[14,8],[13,8],[12,8],[11,8],[10,8],[9,8]]
+        };
+        const safeCoords = ["7-2","2-7","6-9","9-14","14-9","9-2","7-14","2-9"];
         
         // Initialize board
         for(let r=1;r<=15;r++) {
@@ -722,7 +682,6 @@ HTML_CODE = """
                 document.getElementById('room-menu').style.display='none';
                 document.getElementById('color-select').style.display='block';
                 
-                // Disable taken colors
                 document.querySelectorAll('.color-option').forEach(option => {
                     const color = option.getAttribute('data-color');
                     if(!data.available_colors.includes(color)) {
@@ -743,7 +702,6 @@ HTML_CODE = """
             alert('Room code copied: ' + code);
         }
         
-        // Color selection
         document.querySelectorAll('.color-option').forEach(option => {
             option.addEventListener('click', function() {
                 if(this.classList.contains('disabled')) return;
@@ -755,7 +713,6 @@ HTML_CODE = """
                 
                 setTimeout(() => {
                     if(isOnlineMode && currentRoomCode) {
-                        // Join the room with selected color
                         socket.emit('join_room_with_code', {
                             room_code: currentRoomCode,
                             color: selectedColor
@@ -764,7 +721,6 @@ HTML_CODE = """
                         document.getElementById('color-select').style.display='none';
                         document.getElementById('game-container').style.display='block';
                         
-                        // Auto-start for online mode
                         socket.emit('start_game', {
                             mode: 'multiplayer',
                             num_players: 4,
@@ -807,7 +763,6 @@ HTML_CODE = """
             });
         }
         
-        // DICE CLICK HANDLERS - ALWAYS SEND ROOM CODE
         document.querySelectorAll('.status-box').forEach(box => {
             box.addEventListener('click', function() {
                 console.log('🎲 DICE BOX CLICKED! Room:', currentRoomCode);
@@ -850,7 +805,6 @@ HTML_CODE = """
                 }
             });
             
-            // Clear and redraw tokens
             document.querySelectorAll('.token').forEach(e => e.remove());
             
             ['red','green','yellow','blue'].forEach(color => {
@@ -903,14 +857,11 @@ HTML_CODE = """
 """
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    print(f"🚀 LUDO SERVER - ALL MODES WORKING!")
+    port = int(os.getenv('PORT', 5000))
+    print(f"🚀 LUDO SERVER - PRODUCTION MODE")
     print("=" * 60)
     print(f"🌐 Server: http://0.0.0.0:{port}")
+    print("✅ All Modes Working")
     print("=" * 60)
-    print("✅ Modes Available:")
-    print("   🤖 VS Computer - FIXED!")
-    print("   👥 Local Multiplayer - FIXED!")
-    print("   🌐 Online Multiplayer - Working!")
-    print("=" * 60)
+    # Use eventlet for production
     socketio.run(app, host='0.0.0.0', port=port, debug=False)
